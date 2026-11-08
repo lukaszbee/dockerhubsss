@@ -1,0 +1,125 @@
+name: Build, scan and publish image
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  image:
+    name: Validate and publish image
+    runs-on: ubuntu-latest
+    env:
+      IMAGE: ${{ vars.DOCKERHUB_USERNAME }}/${{ vars.DOCKERHUB_IMAGE_NAME }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Lint Dockerfile with Hadolint
+        id: hadolint
+        uses: hadolint/hadolint-action@v3.2.0
+        with:
+          dockerfile: Dockerfile
+
+      - name: Scan Dockerfile with Checkov
+        id: checkov
+        if: always()
+        uses: bridgecrewio/checkov-action@v12
+        with:
+          file: Dockerfile
+          framework: dockerfile
+          quiet: true
+
+      - name: Set up Docker Buildx
+        id: buildx
+        if: always()
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build image for scanning
+        id: build
+        if: always() && steps.buildx.outcome == 'success'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          tags: ${{ env.IMAGE }}:${{ github.sha }}
+          load: true
+
+      - name: Scan image with Trivy
+        id: trivy
+        if: always() && steps.build.outcome == 'success'
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: ${{ env.IMAGE }}:${{ github.sha }}
+          format: table
+          exit-code: "1"
+          ignore-unfixed: true
+          vuln-type: os,library
+          severity: CRITICAL,HIGH
+
+      - name: Scan image with Dockle
+        id: dockle
+        if: always() && steps.build.outcome == 'success'
+        uses: goodwithtech/dockle-action@v0.1.2
+        with:
+          image: ${{ env.IMAGE }}:${{ github.sha }}
+          exit-code: "1"
+          exit-level: warn
+
+      - name: Log in to Docker Hub
+        id: login
+        if: success() && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main'
+        uses: docker/login-action@v3
+        with:
+          username: ${{ vars.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Push image to Docker Hub
+        id: push
+        if: success() && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main'
+        run: |
+          docker tag "$IMAGE:${GITHUB_SHA}" "$IMAGE:latest"
+          docker push "$IMAGE:${GITHUB_SHA}"
+          docker push "$IMAGE:latest"
+
+      - name: Write checks summary
+        if: always()
+        env:
+          HADOLINT_RESULT: ${{ steps.hadolint.outcome }}
+          CHECKOV_RESULT: ${{ steps.checkov.outcome }}
+          BUILD_RESULT: ${{ steps.build.outcome }}
+          TRIVY_RESULT: ${{ steps.trivy.outcome }}
+          DOCKLE_RESULT: ${{ steps.dockle.outcome }}
+          LOGIN_RESULT: ${{ steps.login.outcome }}
+          PUSH_RESULT: ${{ steps.push.outcome }}
+        run: |
+          result_row() {
+            name="$1"
+            result="$2"
+            failure="$3"
+            skipped="$4"
+            case "$result" in
+              success) printf '| %s | ✅ PASS | — |\n' "$name" ;;
+              failure) printf '| %s | ❌ FAIL | %s; szczegóły w logu kroku |\n' "$name" "$failure" ;;
+              *) printf '| %s | ⏭ POMINIĘTO | %s |\n' "$name" "$skipped" ;;
+            esac
+          }
+
+          {
+            echo "## Podsumowanie kontroli obrazu"
+            echo
+            echo "| Kontrola | Wynik | Informacja |"
+            echo "| --- | --- | --- |"
+            result_row "Hadolint" "$HADOLINT_RESULT" "Błąd lintowania Dockerfile" "Nie uruchomiono"
+            result_row "Checkov" "$CHECKOV_RESULT" "Niezgodność z polityką Dockerfile" "Nie uruchomiono"
+            result_row "Budowanie obrazu" "$BUILD_RESULT" "Błąd budowania obrazu" "Nie uruchomiono"
+            result_row "Trivy" "$TRIVY_RESULT" "Wykryto podatności CRITICAL/HIGH" "Nie zbudowano obrazu"
+            result_row "Dockle" "$DOCKLE_RESULT" "Wykryto problemy o poziomie WARN lub FATAL" "Nie zbudowano obrazu"
+            result_row "Logowanie do Docker Hub" "$LOGIN_RESULT" "Błąd logowania; sprawdź DOCKERHUB_TOKEN i DOCKERHUB_USERNAME" "Publikacja tylko przy push lub workflow_dispatch na main po zaliczeniu kontroli"
+            result_row "Publikacja obrazu" "$PUSH_RESULT" "Błąd wysyłania obrazu do Docker Hub" "Publikacja tylko przy push lub workflow_dispatch na main po zaliczeniu kontroli"
+          } >> "$GITHUB_STEP_SUMMARY"
