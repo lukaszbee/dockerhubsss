@@ -65,11 +65,15 @@ jobs:
       - name: Scan image with Dockle
         id: dockle
         if: always() && steps.build.outcome == 'success'
-        uses: goodwithtech/dockle-action@v0.1.2
-        with:
-          image: ${{ env.IMAGE }}:${{ github.sha }}
-          exit-code: "1"
-          exit-level: warn
+        run: |
+          image_archive="$RUNNER_TEMP/dockerhubsss-image.tar"
+          docker save --output "$image_archive" "$IMAGE:${GITHUB_SHA}"
+          docker run --rm \
+            --volume "$image_archive:/image.tar:ro" \
+            goodwithtech/dockle:v0.4.15 \
+            --input /image.tar \
+            --exit-code 1 \
+            --exit-level warn
 
       - name: Log in to Docker Hub
         id: login
@@ -119,7 +123,7 @@ jobs:
             result_row "Checkov" "$CHECKOV_RESULT" "Niezgodność z polityką Dockerfile" "Nie uruchomiono"
             result_row "Budowanie obrazu" "$BUILD_RESULT" "Błąd budowania obrazu" "Nie uruchomiono"
             result_row "Trivy" "$TRIVY_RESULT" "Wykryto podatności CRITICAL/HIGH" "Nie zbudowano obrazu"
-            result_row "Dockle" "$DOCKLE_RESULT" "Wykryto problemy o poziomie WARN lub FATAL" "Nie zbudowano obrazu"
+            result_row "Dockle" "$DOCKLE_RESULT" "Błąd skanowania lub wykryto problemy WARN/FATAL" "Nie zbudowano obrazu"
             result_row "Logowanie do Docker Hub" "$LOGIN_RESULT" "Błąd logowania; sprawdź DOCKERHUB_TOKEN i DOCKERHUB_USERNAME" "Publikacja tylko przy push lub workflow_dispatch na main po zaliczeniu kontroli"
             result_row "Publikacja obrazu" "$PUSH_RESULT" "Błąd wysyłania obrazu do Docker Hub" "Publikacja tylko przy push lub workflow_dispatch na main po zaliczeniu kontroli"
           } >> "$GITHUB_STEP_SUMMARY"
