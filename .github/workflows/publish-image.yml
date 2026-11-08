@@ -53,7 +53,7 @@ jobs:
       - name: Scan image with Trivy
         id: trivy
         if: always() && steps.build.outcome == 'success'
-        uses: aquasecurity/trivy-action@v0.28.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: ${{ env.IMAGE }}:${{ github.sha }}
           format: table
